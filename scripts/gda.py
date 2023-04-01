@@ -8,35 +8,67 @@ from scripts.model import LanguageModel
 from scripts.dataset import TextDataset
 from tqdm.notebook import tqdm
 from torch import nn
+from sklearn.mixture import GaussianMixture
+
+
+
 class GDA:
     
     def __init__(self, model_name, n_features : int = 256):
         self.n_features = 256
         self.model_name = model_name
-        self.mu = None
-        self.sigma = None
-        self.model = None 
+        self.gda = dict()
+        self.gma = dict()
+        self.model = None
         
     def fit(self,X):
-        test_set = TextDataset(X, 'all')
-        loader = DataLoader(test_set, batch_size=1000, shuffle=False)
-
-        self.model = self.load_checkpoint(X)
+        embeds = self.get_embeds(X)
+#         embeds = torch.tensor([[0.,1.],[2.,3.]]).repeat((20,1))
+        self.gda['mu'] = embeds.mean(0).numpy()
+        self.gda['sigma'] = np.cov(embeds.numpy(), rowvar=0)
         
-        embeds = torch.tensor([])
-        for _,indices, lengths, _ in tqdm(loader):
-            embeds = torch.cat([embeds,self.pass_through(indices, lengths)])
-            
-        self.mu = embeds.mean(0).numpy()
-        self.sigma = np.cov(embeds.numpy(), rowvar=0)
+        grid = [1, 2, 3, 4, 5]
+        for n_component in grid:
+            print(n_component)
+            gm = GaussianMixture(n_component)
+            gm.fit(embeds)
+            self.gma[f'gma_{n_component}'] = gm
+
+        
     
     def predict(self, X, lengths):
+        result = dict()
         embeds = self.pass_through(X, lengths)
-        x_minus_mu0 = embeds.cpu() - self.mu
-        a = -(x_minus_mu0.T * np.matmul(np.linalg.inv(self.sigma), x_minus_mu0.T)).sum(0)
-        b = -(self.n_features * np.log(2*pi) + np.linalg.det(self.sigma))
+        #GDA
+        mu  = self.gda['mu']
+        sigma = self.gda['sigma']
+        result['gda'] = self.norm_log_pdf(embeds, mu, sigma)
+        
+        #GMA
+        grid = [2,5,10,20]
+        for k,est in self.gma.items():
+            result[k] = est.score_samples(embeds.cpu())
+        return result
+        
+    def norm_log_pdf(self,embeds, mu, sigma):
+        x_minus_mu0 = embeds.cpu() - mu
+        a = -(x_minus_mu0.T * np.matmul(np.linalg.inv(sigma), x_minus_mu0.T)).sum(0)
+        b = -(self.n_features * np.log(2*pi) + np.linalg.det(sigma))
         return 0.5*(a+b)
     
+    
+    def get_embeds(self, X):
+        test_set = TextDataset(X, 'all')
+        loader = DataLoader(test_set, batch_size=1000, shuffle=False)
+        
+        self.model = self.load_checkpoint(X)
+        embeds = torch.tensor([])
+        for _,indices, lengths, _ in tqdm(loader):
+            embeds = torch.cat([embeds, self.pass_through(indices, lengths)])
+        return embeds
+            
+        
+        
     def pass_through(self,X, lengths):
         embeds = self.model.embedding(X)
 
@@ -73,4 +105,4 @@ class GDA:
         model.eval()
         return model
 
-
+    
